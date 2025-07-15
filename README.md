@@ -1,3 +1,5 @@
+July 15, 2025- This project has been discontinued in favor of reinline this back into a larger scale community project, whereas shared values were becoming less and less.
+
 ## Powrum
 In the past, I've built a forum into another website. Work was slowly put into it over the years. I've decided to extract the forum and make it an independent forum software. That said, much of the early commit history is not included. The forum was originally built statically, but I am now working to make it dynamic. E.g to be able to change what forum categories exist or change the forums name.
 
