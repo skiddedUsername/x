@@ -23,7 +23,7 @@ const mongoURL =
 	process.env.MONGODB_URL ||
 	process.env.MONGO_URL ||
 	process.env.DATABASE_URL ||
-	`mongodb://127.0.0.1:27017/${process.env.DATABASE_NAME || "db_powrum"}`
+	`mongodb://127.0.0.1:27017/${process.env.DATABASE_NAME || "db_brnx"}`
 
 if (!mongoURL) {
 	throw new Error("❌ MongoDB connection string not found")
