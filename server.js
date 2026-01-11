@@ -133,7 +133,7 @@ app.use(express.static('public', { extensions: ['html'] }))
    Sessions (Railway Safe)
 ========================= */
 
-if (!process.env.SESSION_SECRET) {
+if (!process.env.RAILWAY_ENVIRONMENT) {
 	updateEnv({ SESSION_SECRET: crypto.randomBytes(64).toString('hex') })
 }
 
