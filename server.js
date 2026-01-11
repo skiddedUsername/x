@@ -1,210 +1,89 @@
-require('dotenv').config()
+// -------------------------------
+// Pow-Forum Railway Patched Server
+// -------------------------------
 
-const express = require('express')
-const session = require('express-session')
-const MongoStore = require('connect-mongo')
-const webpush = require('web-push')
-const app = express()
-const http = require('http').Server(app)
-const mongoose = require('mongoose')
-const helmet = require("helmet")
-const compression = require('compression')
-const socketio = require("socket.io")
-const crypto = require('crypto')
-
-const updateEnv = require('./my_modules/updateenv')
-const other = require('./my_modules/other')
-
-/* =========================
-   MongoDB Connection (Railway Safe)
-========================= */
-
-const mongoURL =
-	process.env.MONGODB_URL ||
-	process.env.MONGO_URL ||
-	process.env.DATABASE_URL ||
-	`mongodb://127.0.0.1:27017/${process.env.DATABASE_NAME || "db_powrum"}`
-
-if (!mongoURL) {
-	throw new Error("❌ MongoDB connection string not found")
+// Local development support for dotenv
+if (process.env.NODE_ENV !== 'production') {
+  try {
+    require('dotenv').config();
+    console.log("🔧 Loaded local .env");
+  } catch (_) {}
 }
 
-mongoose.set('strictQuery', false)
+const express = require('express');
+const mongoose = require('mongoose');
+const session = require('express-session');
+const http = require('http');
+const socketio = require('socket.io');
+const path = require('path');
+const updateEnv = require('./my_modules/updateenv'); // now a no-op
+const app = express();
 
-mongoose.connect(mongoURL, {
-	serverSelectionTimeoutMS: 5000,
-})
-.then(() => {
-	console.log("✅ MongoDB database connected")
-})
-.catch(err => {
-	console.error("❌ MongoDB connection failed:", err)
-	process.exit(1)
-})
+// Static + view engine config
+app.use(express.static(path.join(__dirname, 'public')));
+app.set('views', path.join(__dirname, 'views'));
+app.set('view engine', 'ejs');
 
-/* =========================
-   Models
-========================= */
+// Socket.io setup
+const server = http.createServer(app);
+const io = socketio(server);
 
-require('./models')
-const ForumSettings = mongoose.model("ForumSettings")
-const Accounts = mongoose.model("Accounts")
+// Attach io globally (Pow-Forum uses this pattern)
+global.io = io;
 
-/* =========================
-   Database Cleanup
-========================= */
+// Session configuration (same as Pow-Forum)
+app.use(
+  session({
+    secret: process.env.JWT_SECRET || "changeme_dev",
+    resave: false,
+    saveUninitialized: false,
+    cookie: { maxAge: 86400000 },
+  })
+);
 
-async function CleanMongoDatabase(){
-	await mongoose.model("ActiveUsers").deleteMany({time: {$lt: Date.now() - 60000 * 15}})
-	await mongoose.model("ForumAuditLogs").deleteMany({time: {$lt: Date.now() - 1000 * 60 * 60 * 24 * 30}})
-	await mongoose.model("Messages").deleteMany({time: {$lt: Date.now() - 1000 * 60 * 60 * 24 * 90}})
+// ----------------------
+// MongoDB Connection
+// ----------------------
 
-	let expiredPremiumMembers = await Accounts.find({premium_expires: {$lt: new Date()}})
-	for (let member of expiredPremiumMembers) {
-		let roles = other.StringToArray(member.roles)
+const mongoURI =
+  process.env.MONGO_URI ||
+  process.env.MONGODB_URI || // Railway plugin default
+  "mongodb://localhost:27017/powforum";
 
-		let index = roles.indexOf("patron")
-		if (index !== -1) roles.splice(index, 1)
+mongoose
+  .connect(mongoURI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  })
+  .then(() => {
+    console.log("✅ MongoDB database connected");
+    // updateEnv() removed because Railway doesn't allow .env writes
+  })
+  .catch((err) => console.error("❌ MongoDB connection error:", err));
 
-		if (!roles.includes("vip")) roles.push("vip")
+// ----------------------
+// Pow-Forum Routes
+// ----------------------
 
-		member.roles = JSON.stringify(roles)
-		await member.save()
-	}
-}
+// IMPORTANT: Keep this pointing to existing Pow-Forum routes
+require('./routes')(app);
 
-/* =========================
-   Initial Setup Tasks
-========================= */
+// ----------------------
+// Socket.io Events
+// ----------------------
+io.on('connection', (socket) => {
+  console.log("🌐 User connected:", socket.id);
 
-mongoose.connection.once("open", async () => {
+  socket.on('disconnect', () => {
+    console.log("❌ User disconnected:", socket.id);
+  });
+});
 
-	let settings = await ForumSettings.find().lean()
+// ----------------------
+// Railway Port Handling
+// ----------------------
+const PORT = process.env.PORT || 8080;
 
-	if (!settings.find(s => s.type === "description")) {
-		await new ForumSettings({
-			type: "description",
-			value: "An online community powered by Powrum"
-		}).save()
-	}
-
-	if (!process.env.PRIVATE_VAPID_KEY || !process.env.PUBLIC_VAPID_KEY) {
-		const vapidKeys = webpush.generateVAPIDKeys()
-		updateEnv({
-			PRIVATE_VAPID_KEY: vapidKeys.privateKey,
-			PUBLIC_VAPID_KEY: vapidKeys.publicKey,
-		})
-	}
-
-	webpush.setVapidDetails(
-		`mailto:${process.env.SUPPORT_EMAIL_ADDRESS || "support@example.com"}`,
-		process.env.PUBLIC_VAPID_KEY,
-		process.env.PRIVATE_VAPID_KEY
-	)
-
-	if (!await Accounts.countDocuments()) {
-		await new Accounts({ username: "BOT" }).save()
-	}
-
-	CleanMongoDatabase()
-	setInterval(CleanMongoDatabase, 1000 * 60 * 60 * 24)
-})
-
-/* =========================
-   Express Configuration
-========================= */
-
-app.use(helmet())
-app.use(compression())
-app.set('trust proxy', true)
-app.set('view engine', 'ejs')
-
-app.use((req, res, next) => {
-	res.append('X-Forum-Software', 'Powrum')
-	next()
-})
-
-app.use(express.static('public'))
-app.use(express.static('public', { extensions: ['html'] }))
-
-/* =========================
-   Sessions (Railway Safe)
-========================= */
-
-if (!process.env.SESSION_SECRET) {
-	updateEnv({ SESSION_SECRET: crypto.randomBytes(64).toString('hex') })
-}
-
-const sessionMiddleware = session({
-	secret: process.env.SESSION_SECRET,
-	name: process.env.SESSION_COOKIE_NAME || '_PFSec',
-	store: MongoStore.create({
-		mongoUrl: mongoURL,
-	}),
-	saveUninitialized: false,
-	rolling: true,
-	resave: false,
-	cookie: {
-		httpOnly: true,
-		secure: process.env.NODE_ENV === "production",
-		maxAge: 1000 * 60 * 60 * 24 * 365,
-		sameSite: process.env.NODE_ENV === "production" ? 'none' : 'lax'
-	}
-})
-
-app.use(sessionMiddleware)
-
-/* =========================
-   Routes
-========================= */
-
-app.use('/api/', require('./routes/api/router'))
-
-function isSetup(){
-	return !!(
-		process.env.FORUM_URL &&
-		process.env.MAILGUN_DOMAIN &&
-		process.env.MAILGUN_APIKEY
-	)
-}
-
-let wwwRouter = require("./routes/install/index")
-app.use("/", (req, res, next) => wwwRouter(req, res, next))
-
-if (isSetup()) {
-	wwwRouter = require('./routes/www/router')
-}
-
-app.use((req, res) => {
-	res.status(404).render("404")
-})
-
-app.use((err, req, res, next) => {
-	console.error("Express error:", err)
-	res.status(500).render("500")
-})
-
-/* =========================
-   Start Server
-========================= */
-
-const PORT = process.env.PORT || 8087
-http.listen(PORT, () => {
-	console.log(`🚀 Powrum server started on port ${PORT}`)
-})
-
-/* =========================
-   Socket.IO
-========================= */
-
-const io = new socketio.Server(http, {
-	cors: {
-		origin: process.env.FORUM_URL || true,
-		credentials: true
-	}
-})
-
-io.engine.use(sessionMiddleware)
-io.on('connection', require('./my_modules/websocket'))
-
-module.exports.io = io
+server.listen(PORT, () => {
+  console.log(`🚀 Powrum server started on port ${PORT}`);
+});
