@@ -57,7 +57,6 @@ mongoose.connect(mongoURL)
 .then(async ()=> {
 	console.log("MongoDB database connected")
 
-
 	//Automatic database setup for required documents or placeholder documents
 	{
 		let settings = await ForumSettings.find().lean()
