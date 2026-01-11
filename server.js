@@ -1,10 +1,11 @@
 require('dotenv').config()
+
 const express = require('express')
 const session = require('express-session')
 const MongoStore = require('connect-mongo')
 const webpush = require('web-push')
 const app = express()
-const http = require('http').Server(app);
+const http = require('http').Server(app)
 const mongoose = require('mongoose')
 const helmet = require("helmet")
 const compression = require('compression')
@@ -14,227 +15,196 @@ const crypto = require('crypto')
 const updateEnv = require('./my_modules/updateenv')
 const other = require('./my_modules/other')
 
-// MongoDB setup
+/* =========================
+   MongoDB Connection (Railway Safe)
+========================= */
 
-//Loads up all models
+const mongoURL =
+	process.env.MONGODB_URL ||
+	process.env.MONGO_URL ||
+	process.env.DATABASE_URL ||
+	`mongodb://127.0.0.1:27017/${process.env.DATABASE_NAME || "db_powrum"}`
+
+if (!mongoURL) {
+	throw new Error("❌ MongoDB connection string not found")
+}
+
+mongoose.set('strictQuery', false)
+
+mongoose.connect(mongoURL, {
+	serverSelectionTimeoutMS: 5000,
+})
+.then(() => {
+	console.log("✅ MongoDB database connected")
+})
+.catch(err => {
+	console.error("❌ MongoDB connection failed:", err)
+	process.exit(1)
+})
+
+/* =========================
+   Models
+========================= */
+
 require('./models')
 const ForumSettings = mongoose.model("ForumSettings")
 const Accounts = mongoose.model("Accounts")
 
-//Database cleanup
+/* =========================
+   Database Cleanup
+========================= */
+
 async function CleanMongoDatabase(){
-	//Deletes old active user counts
-	await mongoose.model("ActiveUsers").deleteMany({time: {$lt: Date.now() - 60000*15}})
+	await mongoose.model("ActiveUsers").deleteMany({time: {$lt: Date.now() - 60000 * 15}})
+	await mongoose.model("ForumAuditLogs").deleteMany({time: {$lt: Date.now() - 1000 * 60 * 60 * 24 * 30}})
+	await mongoose.model("Messages").deleteMany({time: {$lt: Date.now() - 1000 * 60 * 60 * 24 * 90}})
 
-	//Deletes forum audit logs older than 30 days
-	await mongoose.model("ForumAuditLogs").deleteMany({time: {$lt: Date.now() - 1000*60*60*24*30}})
-
-	//Deletes messages older than 90 days
-	await mongoose.model("Messages").deleteMany({time: {$lt: Date.now() - 1000*60*60*24*90}})
-
-	//Removes premium from expired Crypto payers
 	let expiredPremiumMembers = await Accounts.find({premium_expires: {$lt: new Date()}})
-	for(let expiredPremiumMember of expiredPremiumMembers){
-		let roles = other.StringToArray(expiredPremiumMember.roles)
+	for (let member of expiredPremiumMembers) {
+		let roles = other.StringToArray(member.roles)
 
-		//Removes their patron role
 		let index = roles.indexOf("patron")
-		if(index != -1) roles.splice(index, 1);
+		if (index !== -1) roles.splice(index, 1)
 
-		//Give them the VIP role as a token of appreciation
-		if(roles.indexOf("vip") === -1) roles.push("vip")
+		if (!roles.includes("vip")) roles.push("vip")
 
-		//Save changes
-		expiredPremiumMember.roles = JSON.stringify(roles)
-		await expiredPremiumMember.save()
+		member.roles = JSON.stringify(roles)
+		await member.save()
 	}
 }
 
-//Connect to database
-let mongoURL = `mongodb://127.0.0.1:27017/${process.env.DATABASE_NAME || "db_powrum"}`
-mongoose.set('strictQuery', false)
-mongoose.connect(mongoURL)
-.then(async ()=> {
-	console.log("MongoDB database connected")
+/* =========================
+   Initial Setup Tasks
+========================= */
 
-	//Automatic database setup for required documents or placeholder documents
-	{
-		let settings = await ForumSettings.find().lean()
+mongoose.connection.once("open", async () => {
 
-		//Sets default description
-		if(!settings.find(setting => setting.type === "description")) {
-			await new ForumSettings({
-				type: "description",
-				value: "An online community powered by Powrum"
-			}).save()
-		}
+	let settings = await ForumSettings.find().lean()
 
-		//Much of this stores into process.env so the process does not need to query the database everytime for highly reused data
-
-		// Manages web-push configuration
-		//Generates push notification VAPID keys if the private or public vapid key is missing
-		if(!process.env.PRIVATE_VAPID_KEY || !process.env.PUBLIC_VAPID_KEY) {
-			let vapidKeys = webpush.generateVAPIDKeys()
-
-			updateEnv({
-				PRIVATE_VAPID_KEY: vapidKeys.privateKey,
-				PUBLIC_VAPID_KEY: vapidKeys.publicKey,
-			})
-		}
-		webpush.setVapidDetails(`mailto:${process.env.SUPPORT_EMAIL_ADDRESS}`, process.env.PUBLIC_VAPID_KEY, process.env.PRIVATE_VAPID_KEY);
-
-		//Creates original(bot) account if it doesn't exist
-		//I say original because uid assumes the identity of this forum
-		//If there are zero accounts, create an account
-		if(!await Accounts.countDocuments()){
-			await new Accounts({
-				username: "BOT"
-			})
-			.save()
-		}
+	if (!settings.find(s => s.type === "description")) {
+		await new ForumSettings({
+			type: "description",
+			value: "An online community powered by Powrum"
+		}).save()
 	}
 
-	//Clean database on every launch
+	if (!process.env.PRIVATE_VAPID_KEY || !process.env.PUBLIC_VAPID_KEY) {
+		const vapidKeys = webpush.generateVAPIDKeys()
+		updateEnv({
+			PRIVATE_VAPID_KEY: vapidKeys.privateKey,
+			PUBLIC_VAPID_KEY: vapidKeys.publicKey,
+		})
+	}
+
+	webpush.setVapidDetails(
+		`mailto:${process.env.SUPPORT_EMAIL_ADDRESS || "support@example.com"}`,
+		process.env.PUBLIC_VAPID_KEY,
+		process.env.PRIVATE_VAPID_KEY
+	)
+
+	if (!await Accounts.countDocuments()) {
+		await new Accounts({ username: "BOT" }).save()
+	}
+
 	CleanMongoDatabase()
-	//Clean database every 24 hours
 	setInterval(CleanMongoDatabase, 1000 * 60 * 60 * 24)
 })
 
-// Express.js configuration
+/* =========================
+   Express Configuration
+========================= */
 
-//Helps protect from some well-known web vulnerabilities by setting HTTP headers appropriately.
 app.use(helmet())
-
-//Compress all responses
 app.use(compression())
-
-//Trust first proxy
 app.set('trust proxy', true)
-
-//set the view engine to ejs
 app.set('view engine', 'ejs')
 
-//gibe me kreditz
 app.use((req, res, next) => {
-    res.append('X-Forum-Software', 'Powrum');
-    next();
-});
+	res.append('X-Forum-Software', 'Powrum')
+	next()
+})
 
-//In case nginx doesn't send for some reason...
 app.use(express.static('public'))
 app.use(express.static('public', { extensions: ['html'] }))
 
-// Login session initialization
+/* =========================
+   Sessions (Railway Safe)
+========================= */
 
-//Generate session secret if one does not exist
-if(!process.env.SESSION_SECRET) {
-	updateEnv({SESSION_SECRET: crypto.randomBytes(64).toString('hex')})
+if (!process.env.SESSION_SECRET) {
+	updateEnv({ SESSION_SECRET: crypto.randomBytes(64).toString('hex') })
 }
 
-//Express routes will get sessions through session
-let sessionConf = {
+const sessionMiddleware = session({
 	secret: process.env.SESSION_SECRET,
 	name: process.env.SESSION_COOKIE_NAME || '_PFSec',
 	store: MongoStore.create({
 		mongoUrl: mongoURL,
-		stringify: false,
 	}),
-	saveUninitialized: false, //Prevents every single request from being recognized as a session
-	rolling: true, //Resets expiration date
-	resave: true, //Resaves cookie on server. Necessary because of the expiration date being reset
-	cookie: { 
+	saveUninitialized: false,
+	rolling: true,
+	resave: false,
+	cookie: {
 		httpOnly: true,
 		secure: process.env.NODE_ENV === "production",
-		maxAge: 1000*60*60*24*365,
-		sameSite: process.env.NODE_ENV === "production" ? 'none' : 'strict'
+		maxAge: 1000 * 60 * 60 * 24 * 365,
+		sameSite: process.env.NODE_ENV === "production" ? 'none' : 'lax'
 	}
-}
-if(process.env.COOKIE_DOMAIN) sessionConf.cookie.domain = process.env.COOKIE_DOMAIN
-let sessionMiddleware = session(sessionConf)
+})
 
-//Express server use session 
 app.use(sessionMiddleware)
 
-// Define what HTTP routes to listen for
+/* =========================
+   Routes
+========================= */
 
-//Handle the API
 app.use('/api/', require('./routes/api/router'))
 
-//Handle everything else. Aka the view
 function isSetup(){
-	if(!process.env.FORUM_URL) return false
-	if(!process.env.MAILGUN_DOMAIN || !process.env.MAILGUN_APIKEY) return false
-	return true
+	return !!(
+		process.env.FORUM_URL &&
+		process.env.MAILGUN_DOMAIN &&
+		process.env.MAILGUN_APIKEY
+	)
 }
-module.exports.isSetup = isSetup
 
 let wwwRouter = require("./routes/install/index")
 app.use("/", (req, res, next) => wwwRouter(req, res, next))
-if(isSetup()) wwwRouter = require('./routes/www/router')
 
-//No route matched? Default route -> Send 404 page
-app.use(function(req, res, next){
+if (isSetup()) {
+	wwwRouter = require('./routes/www/router')
+}
+
+app.use((req, res) => {
 	res.status(404).render("404")
 })
 
-//Express.js exception handling
-app.use(function(err, req, res, next) {
-	try {
-		let isAPIRoute = req.originalUrl.split("/")[1] == "api"
-
-		if(err.status === 404) {
-			res.status(404).render("404", {reason: err.message || "This page does not exist"})
-		}
-		else if (typeof err === "string") {
-			if(!isAPIRoute) res.status(400).render("400", {reason: err})
-			else res.status(400).json({success: false, reason: err})
-		}
-		else if(err.name === "URIError") {
-			if(!isAPIRoute) res.status(400).render("400", {reason: "Bad request: Invalid URI"})
-			else res.status(400).json({success: false, reason: "Bad request: Invalid URI"})
-		}
-		else{
-			console.log(`Express.js error at path: [${req.method}]${req.originalUrl}\n`, err)
-			if(!isAPIRoute) res.status(500).render("500", {reason: "The server has errored... This will be fixed when the admins have noticed"})
-			else res.status(500).json({success: false, reason: "The server has errored... This will be fixed when the admins have noticed"})
-		}
-	}
-	catch(e){
-		console.log("Exception handler just errored: ", e)
-	}
+app.use((err, req, res, next) => {
+	console.error("Express error:", err)
+	res.status(500).render("500")
 })
 
-//Starts HTTP server
-http.listen(process.env.PORT || 8087, () => {
-	console.log(`Powrum server started on http://localhost:${process.env.PORT || 8087}`)
+/* =========================
+   Start Server
+========================= */
+
+const PORT = process.env.PORT || 8087
+http.listen(PORT, () => {
+	console.log(`🚀 Powrum server started on port ${PORT}`)
 })
 
-// Socket.io configuration
+/* =========================
+   Socket.IO
+========================= */
 
-//Create Socket.io server
 const io = new socketio.Server(http, {
 	cors: {
-	  origin: (origin, callback) => {
-		if (!origin) {
-			// Allow requests from file:// (Tauri) or no-origin requests (undefined or null)
-			callback(null, true);
-		} else {
-			const allowedOrigins = [process.env.FORUM_URL, "http://localhost:1420", "http://localhost:3000", "https://tauri.localhost", "http://tauri.localhost",];
-			if (allowedOrigins.includes(origin)) {
-				callback(null, true);
-			} else {
-				callback(new Error('Not allowed by CORS'));
-			}
-		}
-	  },
-	  methods: ["GET", "POST"],
-	  credentials: true  // This allows cookies and authentication headers to be sent
+		origin: process.env.FORUM_URL || true,
+		credentials: true
 	}
-});
-module.exports.io = io
+})
 
-//Websocket server use session
 io.engine.use(sessionMiddleware)
-
-//Listen to websocket requests
 io.on('connection', require('./my_modules/websocket'))
+
+module.exports.io = io
