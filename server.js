@@ -53,9 +53,23 @@ async function CleanMongoDatabase(){
 //Connect to database
 let mongoURL = `mongodb://127.0.0.1:27017/${process.env.DATABASE_NAME || "db_powrum"}`
 mongoose.set('strictQuery', false)
-mongoose.connect(mongoURL)
-.then(async ()=> {
-	console.log("MongoDB database connected")
+const mongoUri =
+  process.env.MONGO_URL ||
+  process.env.MONGO_URI ||
+  process.env.DATABASE_URL;
+
+if (!mongoUri) {
+  console.error("❌ MongoDB connection string not found");
+  process.exit(1);
+}
+
+mongoose.connect(mongoUri)
+  .then(() => console.log("✅ Connected to MongoDB"))
+  .catch(err => {
+    console.error("❌ MongoDB connection failed:", err);
+    process.exit(1);
+  });
+
 
 	//Automatic database setup for required documents or placeholder documents
 	{
