@@ -51,11 +51,27 @@ async function CleanMongoDatabase(){
 }
 
 //Connect to database
-let mongoURL = `mongodb://127.0.0.1:27017/${process.env.DATABASE_NAME || "db_powrum"}`
-mongoose.set('strictQuery', false)
-mongoose.connect(mongoURL)
-.then(async ()=> {
-	console.log("MongoDB database connected")
+const mongoose = require('mongoose');
+
+const mongoURI =
+  process.env.MONGO_URI ||
+  process.env.MONGODB_URI; // fallback if plugin injects this
+
+if (!mongoURI) {
+  console.error("❌ No MongoDB URI found in environment variables");
+  process.exit(1);
+}
+
+mongoose.connect(mongoURI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log("✅ MongoDB database connected"))
+.catch(err => {
+  console.error("❌ MongoDB connection error:", err.message);
+  process.exit(1);
+});
+
 
 	//Automatic database setup for required documents or placeholder documents
 	{
