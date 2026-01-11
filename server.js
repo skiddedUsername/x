@@ -90,11 +90,13 @@ mongoose.connection.once("open", async () => {
 
 	if (!process.env.PRIVATE_VAPID_KEY || !process.env.PUBLIC_VAPID_KEY) {
 		const vapidKeys = webpush.generateVAPIDKeys()
-		updateEnv({
-			PRIVATE_VAPID_KEY: vapidKeys.privateKey,
-			PUBLIC_VAPID_KEY: vapidKeys.publicKey,
-		})
-	}
+if (!process.env.RAILWAY_ENVIRONMENT) {
+	updateEnv({
+		PRIVATE_VAPID_KEY: vapidKeys.privateKey,
+		PUBLIC_VAPID_KEY: vapidKeys.publicKey,
+	})
+}
+
 
 	webpush.setVapidDetails(
 		`mailto:${process.env.SUPPORT_EMAIL_ADDRESS || "support@example.com"}`,
